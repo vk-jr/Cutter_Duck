@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 import requests
-from PIL import Image, ImageFilter
+from PIL import Image
 from io import BytesIO
 import os
 import uuid
@@ -11,63 +11,26 @@ app = FastAPI()
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 
-import numpy as np
-
-def cut_with_mask(orig_bytes, mask_bytes, diff_thresh=30):
-    # Load images
-    original = Image.open(BytesIO(orig_bytes)).convert("RGB")
-    mask_img = Image.open(BytesIO(mask_bytes)).convert("RGB")
-    
-    # Ensure dimensions match
-    if mask_img.size != original.size:
-        mask_img = mask_img.resize(original.size)
-            
-    # Convert to numpy arrays
-    arr_orig = np.array(original)
-    arr_mask = np.array(mask_img)
-    
-    # conversion to int16 to avoid overflow during subtraction
-    arr_orig = arr_orig.astype(np.int16)
-    arr_mask = arr_mask.astype(np.int16)
-    
-    # Calculate absolute difference
-    diff = np.abs(arr_orig - arr_mask)
-    
-    # Create mask: Pixel is 'Changed' AND 'Blue Dominant in Mask'
-    # 1. Changed: Sum of absolute differences > threshold
-    is_changed = np.sum(diff, axis=2) > diff_thresh
-    
-    # 2. Blue Dominant in Mask (Mask Blue > Red AND Mask Blue > Green)
-    # Note: We need to use the original uint8 values for color comparison ideally, 
-    # but the int16 is fine as values are same 0-255 range.
-    m_r = arr_mask[:,:,0]
-    m_g = arr_mask[:,:,1]
-    m_b = arr_mask[:,:,2]
-    is_blue = (m_b > m_r) & (m_b > m_g)
-    
-    # Combine: Changed AND Blue
-    final_mask = is_changed & is_blue
-    
-    # Convert boolean mask to uint8 alpha channel (0 or 255)
-    alpha_arr = (final_mask * 255).astype(np.uint8)
-    
-    # Create PIL image from alpha array
-    alpha_img = Image.fromarray(alpha_arr, mode='L')
-    
-    # Clean up artifacts (rectangles)
-    # Agressive Erosion to remove thicker lines (kernel size 17)
-    alpha_img = alpha_img.filter(ImageFilter.MinFilter(17))
-    # Dilation to restore shape
-    alpha_img = alpha_img.filter(ImageFilter.MaxFilter(17))
-    
-    # Apply alpha to original
-    original.putalpha(alpha_img)
-    
-    # Crop to content
+def cut_with_mask(orig_bytes, mask_bytes, red_thresh=150, green_thresh=100, blue_thresh=100):
+    original = Image.open(BytesIO(orig_bytes)).convert("RGBA")
+    mask = Image.open(BytesIO(mask_bytes)).convert("RGB")
+    if mask.size != original.size:
+        mask = mask.resize(original.size)
+    width, height = mask.size
+    mask_data = mask.load()
+    alpha = Image.new("L", (width, height), 0)
+    alpha_data = alpha.load()
+    for y in range(height):
+        for x in range(width):
+            r, g, b = mask_data[x, y]
+            if r > red_thresh and g < green_thresh and b < blue_thresh:
+                alpha_data[x, y] = 255
+            else:
+                alpha_data[x, y] = 0
+    original.putalpha(alpha)
     bbox = original.getbbox()
     if bbox:
         original = original.crop(bbox)
-        
     out = BytesIO()
     original.save(out, format="PNG")
     out.seek(0)
